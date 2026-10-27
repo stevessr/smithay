@@ -4,6 +4,20 @@
 
 ### Breaking changes
 
+`wayland::virtual_keyboard` no longer sends key events to focused clients on its
+own. A virtual keyboard is now an regular input device:
+`VirtualKeyboardManagerState::new` requires the state to implement the new
+`VirtualKeyboardHandler`, which receives `InputEvent<VirtualKeyboardBackend>`s
+for the compositor to handle like real devices (so special keys, compositor
+bindings, idle handling and focus works properly). The compositor has to
+activate the device's keymap (`VirtualKeyboardDevice::keymap`) before processing
+its key events. Modifiers set with the `modifiers` request are not reset when
+the device is destroyed (the masks are absolute, so that would also clear state
+not set by the device, like locks set by other devices on a shared keymap). The
+compositor is responsible for reconciling the modifier state on `DeviceRemoved`
+(e.g., by tracking the bits set by it). `VirtualKeyboardUserData` is no longer
+generic over the state type.
+
 `crate::wayland::selection::data_device::start_dnd` was removed in favor of exposing the
 underlying `DnDGrab` and associated types to make it possible to write external Drag&Drop sources
 and targets (e.g. for other shell implementations). See the `Additions`-section for more info.
@@ -123,6 +137,23 @@ with the correct lock instance.
 `backend::input` and `input` now use `backend::input::InputTime` for timestamps instead of `u32` or `u64`. `InputTime::now()`
 is used for timestamps for synthesized events.
 
+`TextInputActivation` must be implemented. It allows for hooks to be run when a text input is `activated` and `deactivated`.
+
+`KeyboardHandle::input_intercept()` now has a `source` argument and early-returns `None` when the key was already pressed/released, matching the behavior of `KeyboardHandle::input()`.
+
+```diff
+-let (res, mods_changed) = keyboard.input_intercept(data, keycode, state, filter);
++let Some((res, mods_changed)) = keyboard.input_intercept(
++    KeyboardSource::MAIN,
++    data,
++    keycode,
++    state,
++    filter,
++) else {
++    return;
++};
+```
+
 ### Additions
 
 - Add `WmWindowProperty::Other` to forward unrecognized X11 property changes to the compositor.
@@ -132,6 +163,24 @@ is used for timestamps for synthesized events.
   `XdgDecorationHandler` gained an optional `decoration_destroyed` method notifying the
   compositor that the client destroyed the decoration object, so it can switch the surface
   back to client-side decorations on the next commit as the protocol requires.
+
+- The wlr virtual pointer protocol is now available in `smithay::wayland::virtual_pointer`.
+
+- `Xkb::keymap_as_string` returns the active keymap as `XKB_KEYMAP_FORMAT_TEXT_V1`.
+
+- `XkbContext::set_modifier_mask` applies raw xkb modifier masks to a keyboard
+  for clients that report modifier state directly instead of through key presses
+  (e.g., `zwp_virtual_keyboard_v1.modifiers`).
+
+- `KeyboardHandle::input_forward_bypassing_grab` sends a key skipping the active
+  grab, which can be used by compositors to prevent infinite loops when a client
+  with a grab forwards a key through its own virtual keyboard, which can be
+  tracked with `InputMethodHandle::keyboard_grab_client` and
+  `VirtualKeyboardDevice::client`.
+
+- `VirtualKeyboardDevice::source` gives each virtual keyboard its own
+  `KeyboardSource` so keys pressed on multiple devices are released when the
+  last one is released.
 - ExtBackgroundEffect protocol is now available in `smithay::wayland::background_effect` module.
 - `DrmSurface::use_color_state` (and the corresponding `DrmCompositor::use_color_state`) allows
   staging connector color state — `Colorspace`, `HDR_OUTPUT_METADATA` and `max bpc` — which is
@@ -262,6 +311,11 @@ additionally drops the buffers cached for copying between a render and a target 
 `Renderer` owns.
 
 ### Bugfixes
+
+`input_method_v2`: a second input method binding a seat that already has one is now the object told
+it is `unavailable`, per the protocol, leaving the existing instance in place. Previously the event
+went to the existing instance and the newcomer was dropped untracked. Destroying such an inert
+newcomer no longer clears the active instance, and its requests no longer drive the seat.
 
 `DrmSurface::use_vrr(false)` now succeeds as a no-op when using legacy DRM. Attempts to enable VRR
 on legacy DRM still return `UnknownProperty`.
